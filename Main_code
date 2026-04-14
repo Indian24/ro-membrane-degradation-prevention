@@ -1,0 +1,277 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// =======================
+// OLED Setup
+// =======================
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// =======================
+// Pin Setup
+// =======================
+#define ONE_WIRE_BUS 4   // DS18B20
+#define TDS_PIN 34       // TDS sensor analog input
+#define WATER_PIN 35     // Water level sensor analog input
+#define LED_PIN 5        // Status LED
+#define RELAY_PIN 25     // Pump relay
+
+// =======================
+// Relay Logic
+// =======================
+// Change these two only if your relay module works opposite.
+#define RELAY_ON  HIGH
+#define RELAY_OFF LOW
+
+// =======================
+// Sensor Setup
+// =======================
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// =======================
+// Thresholds
+// =======================
+const float TEMP_LIMIT_C = 45.0;        // General alert threshold
+const float TEMP_RELAY_LIMIT_C = 35.0;  // Pump OFF above this, ON at or below this
+const float TDS_WARN_PPM = 100.0;
+const float TDS_BAD_PPM  = 150.0;
+
+// =======================
+// TDS Buffer
+// =======================
+const int TDS_SAMPLES = 10;
+float tdsBuffer[TDS_SAMPLES];
+int tdsIndex = 0;
+int tdsCount = 0;
+
+// =======================
+// Relay State
+// =======================
+bool pumpIsOn = true;
+
+// =======================
+// Functions
+// =======================
+
+float readTemperatureC() {
+  sensors.requestTemperatures();
+  float tempC = sensors.getTempCByIndex(0);
+  if (tempC == DEVICE_DISCONNECTED_C) return NAN;
+  return tempC;
+}
+
+int readMedianADC(int pin, int samples = 15) {
+  int values[25];
+  if (samples > 25) samples = 25;
+
+  for (int i = 0; i < samples; i++) {
+    values[i] = analogRead(pin);
+    delay(5);
+  }
+
+  for (int i = 0; i < samples - 1; i++) {
+    for (int j = i + 1; j < samples; j++) {
+      if (values[j] < values[i]) {
+        int t = values[i];
+        values[i] = values[j];
+        values[j] = t;
+      }
+    }
+  }
+  return values[samples / 2];
+}
+
+float adcToVoltage(int adc) {
+  return (adc / 4095.0) * 3.3;
+}
+
+float computeTDSppm(float voltage, float tempC) {
+  float compensation = 1.0 + 0.02 * (tempC - 25.0);
+  float v = voltage / compensation;
+
+  float tds = (133.42 * pow(v, 3)
+             - 255.86 * pow(v, 2)
+             + 857.39 * v) * 0.5;
+
+  if (tds < 0) tds = 0;
+  return tds;
+}
+
+float movingAverageTDS(float val) {
+  tdsBuffer[tdsIndex] = val;
+  tdsIndex = (tdsIndex + 1) % TDS_SAMPLES;
+
+  if (tdsCount < TDS_SAMPLES) tdsCount++;
+
+  float sum = 0;
+  for (int i = 0; i < tdsCount; i++) sum += tdsBuffer[i];
+
+  return sum / tdsCount;
+}
+
+float waterLevelLiters(int adc) {
+  int minADC = 300;   // adjust after calibration
+  int maxADC = 3000;  // adjust after calibration
+
+  if (adc < minADC) adc = minADC;
+  if (adc > maxADC) adc = maxADC;
+
+  float level = (float)(adc - minADC) / (maxADC - minADC);
+  return level * 8.0; // 0–8 liters
+}
+
+void setPump(bool on) {
+  pumpIsOn = on;
+  digitalWrite(RELAY_PIN, on ? RELAY_ON : RELAY_OFF);
+}
+
+// =======================
+// Setup
+// =======================
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+
+  // Start with pump ON by default
+  setPump(true);
+
+  Wire.begin(21, 22);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED failed");
+    while (true);
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+
+  sensors.begin();
+
+  analogReadResolution(12);
+  analogSetPinAttenuation(TDS_PIN, ADC_11db);
+  analogSetPinAttenuation(WATER_PIN, ADC_11db);
+
+  Serial.println("System Started");
+}
+
+// =======================
+// Loop
+// =======================
+void loop() {
+  float tempC = readTemperatureC();
+
+  int adc = readMedianADC(TDS_PIN);
+  float voltage = adcToVoltage(adc);
+
+  float tempForTDS = isnan(tempC) ? 25.0 : tempC;
+  float tds = movingAverageTDS(computeTDSppm(voltage, tempForTDS));
+
+  int waterADC = analogRead(WATER_PIN);
+  float liters = waterLevelLiters(waterADC);
+
+  // =======================
+  // Relay Control Logic
+  // =======================
+  // Correct logic:
+  // Temp > 35°C  -> pump OFF
+  // Temp <= 35°C -> pump ON
+  if (!isnan(tempC)) {
+    if (tempC > TEMP_RELAY_LIMIT_C) {
+      setPump(false);   // stop pump
+    } else {
+      setPump(true);    // allow pump
+    }
+  } else {
+    // Safety behavior if temperature sensor fails:
+    // keep pump OFF
+    setPump(false);
+  }
+
+  // =======================
+  // LED Logic
+  // =======================
+  if (!isnan(tempC) && tempC > TEMP_LIMIT_C) {
+    digitalWrite(LED_PIN, HIGH);
+    delay(100);
+    digitalWrite(LED_PIN, LOW);
+    delay(100);
+  }
+  else if (tds > TDS_BAD_PPM) {
+    digitalWrite(LED_PIN, HIGH);
+    delay(500);
+    digitalWrite(LED_PIN, LOW);
+    delay(500);
+  }
+  else {
+    digitalWrite(LED_PIN, HIGH);
+  }
+
+  // =======================
+  // SERIAL OUTPUT
+  // =======================
+  Serial.println("----------------------");
+  Serial.print("Temp: ");
+  Serial.println(tempC);
+  Serial.print("TDS: ");
+  Serial.println(tds);
+  Serial.print("Water Level: ");
+  Serial.print(liters, 2);
+  Serial.println(" L");
+  Serial.print("Pump: ");
+  Serial.println(pumpIsOn ? "ON" : "OFF");
+
+  // =======================
+  // OLED DISPLAY
+  // =======================
+  display.clearDisplay();
+
+  display.setCursor(0, 0);
+  display.println("Smart RO System");
+
+  display.setCursor(0, 12);
+  display.print("Temp: ");
+  if (isnan(tempC)) {
+    display.println("Error");
+  } else {
+    display.print(tempC, 2);
+    display.println(" C");
+  }
+
+  display.setCursor(0, 24);
+  display.print("TDS: ");
+  display.print(tds, 1);
+  display.println(" ppm");
+
+  display.setCursor(0, 36);
+  display.print("Water: ");
+  display.print(liters, 1);
+  display.println(" L");
+
+  display.setCursor(0, 48);
+  display.print("Pump: ");
+  display.println(pumpIsOn ? "ON" : "OFF");
+
+  display.setCursor(72, 48);
+  if (isnan(tempC)) {
+    display.print("SENSOR");
+  } else if (tempC > TEMP_RELAY_LIMIT_C) {
+    display.print("HOT");
+  } else if (tds > TDS_BAD_PPM) {
+    display.print("FILTER");
+  } else if (tds > TDS_WARN_PPM) {
+    display.print("WARN");
+  } else {
+    display.print("NORMAL");
+  }
+
+  display.display();
+  delay(1000);
+}
