@@ -5,7 +5,7 @@
 [![Status: Prototype](https://img.shields.io/badge/Status-Working_Prototype-brightgreen.svg)]()
 
 ## 1. One-Line Summary
-[cite_start]A compact, ESP32-based IoT retrofit that monitors inlet temperature, total dissolved solids (TDS), and water level in real time to protect home reverse osmosis (RO) membranes via automated relay control. [cite: 11]
+A compact, ESP32-based IoT retrofit that monitors inlet temperature, total dissolved solids (TDS), and water level in real time to protect home reverse osmosis (RO) membranes via automated relay control. [cite: 11]
 
 ## 2. Problem Statement
 [cite_start]Household RO systems are typically only assessed during scheduled service, leaving users unaware of membrane conditions between maintenance sessions. [cite: 18] [cite_start]Hidden degradation only becomes apparent when permeate quality drops. [cite: 19] [cite_start]Furthermore, warm feed water during summer months hastens fouling, biofouling, and scaling, which reduces membrane life and increases maintenance costs. [cite: 10] [cite_start]Purifiers currently run without thermal awareness, pushing the system into hazardous heat conditions. [cite: 23]
